@@ -25,6 +25,10 @@ batch_size = 128
 learning_rate = 0.001
 epochs = 30
 
+# Create results directory if it doesn't exist
+results_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../results/'))
+os.makedirs(results_dir, exist_ok=True)
+
 # Data Transformations
 transform = transforms.Compose([
     transforms.ToTensor(),
@@ -38,10 +42,7 @@ test_dataset = torchvision.datasets.CIFAR10(root='../data', train=False, downloa
 # Train-Validation Split
 train_size = int(0.8 * len(train_dataset))
 val_size = len(train_dataset) - train_size
-train_indices = list(range(len(train_dataset)))
-random.shuffle(train_indices)
-train_subset = Subset(train_dataset, train_indices[:train_size])
-val_subset = Subset(train_dataset, train_indices[train_size:])
+train_subset, val_subset = random_split(train_dataset, [train_size, val_size])
 
 train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
@@ -91,6 +92,8 @@ if not os.path.exists(model_path):
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     model.train()
+    training_losses = []
+    validation_losses = []
     for epoch in range(epochs):
         running_loss = 0.0
         for images, labels in train_loader:
@@ -100,7 +103,29 @@ if not os.path.exists(model_path):
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
-        print(f"Epoch [{epoch+1}/{epochs}], Loss: {running_loss / len(train_loader):.4f}")
+        # Validation Loss
+        model.eval()
+        val_loss = 0.0
+        with torch.inference_mode():
+            for val_images, val_labels in val_loader:
+                val_outputs = model(val_images)
+                val_loss += criterion(val_outputs, val_labels).item()
+        model.train()
+        epoch_train_loss = running_loss / len(train_loader)
+        epoch_val_loss = val_loss / len(val_loader)
+        training_losses.append(epoch_train_loss)
+        validation_losses.append(epoch_val_loss)
+        print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}")
+    # Save loss curves
+    plt.figure()
+    plt.plot(training_losses, label='Training Loss')
+    plt.plot(validation_losses, label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.savefig(os.path.join(results_dir, 'loss_curve.png'))
+    plt.close()
     torch.save(model.state_dict(), model_path)
     print("Baseline model trained and saved!")
 else:
@@ -127,16 +152,19 @@ def add_noise(img):
     noise = torch.randn_like(img) * 0.1
     return torch.clamp(img + noise, 0, 1)
 
-perturbed_dataset = [(add_noise(img), label) for img, label in train_subset]
-perturbed_loader = DataLoader(perturbed_dataset, batch_size=batch_size, shuffle=True)
+def perturb_collate_fn(batch):
+    images, labels = zip(*batch)
+    noisy_images = [add_noise(img) for img in images]
+    return torch.stack(noisy_images), torch.tensor(labels)
+
+perturbed_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, collate_fn=perturb_collate_fn)
 print("Input Perturbation dataset prepared!")
 
 # Evaluation and Confusion Matrix
-
-def evaluate_and_visualize(model, data_loader, name):
+def evaluate_and_visualize(model, data_loader, name, show_plot=True):
     model.eval()
     y_true, y_pred = [], []
-    with torch.no_grad():
+    with torch.inference_mode():
         for images, labels in data_loader:
             outputs = model(images)
             _, predicted = torch.max(outputs, 1)
@@ -145,19 +173,25 @@ def evaluate_and_visualize(model, data_loader, name):
     # Confusion Matrix
     cm = confusion_matrix(y_true, y_pred)
     plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=test_dataset.classes, yticklabels=test_dataset.classes)
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False, xticklabels=test_dataset.classes, yticklabels=test_dataset.classes)
     plt.title(f"{name} Confusion Matrix")
     plt.xlabel("Predicted")
     plt.ylabel("Actual")
-    plt.savefig(f"../results/{name}_confusion_matrix.png")
-    plt.show()
+    plot_path = os.path.join(results_dir, f"{name}_confusion_matrix.png")
+    plt.savefig(plot_path)
+    print(f"Confusion matrix saved at: {plot_path}")
+    if show_plot:
+        plt.show()
+    plt.close()
+    accuracy = accuracy_score(y_true, y_pred)
+    print(f"{name} Accuracy: {accuracy:.4f}")
     print(f"{name} Classification Report:")
     print(classification_report(y_true, y_pred, target_names=test_dataset.classes))
 
 # Evaluate and visualize all datasets
-evaluate_and_visualize(model, test_loader, "Baseline_Test")
-evaluate_and_visualize(model, random_label_loader, "Random_Label_Shuffle")
-evaluate_and_visualize(model, noisy_label_loader, "Label_Noise_20")
-evaluate_and_visualize(model, perturbed_loader, "Input_Perturbation")
+evaluate_and_visualize(model, test_loader, "Baseline_Test", show_plot=True)
+evaluate_and_visualize(model, random_label_loader, "Random_Label_Shuffle", show_plot=True)
+evaluate_and_visualize(model, noisy_label_loader, "Label_Noise_20", show_plot=True)
+evaluate_and_visualize(model, perturbed_loader, "Input_Perturbation", show_plot=True)
 
 print("All experiments completed!")
